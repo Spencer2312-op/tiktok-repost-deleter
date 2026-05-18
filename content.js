@@ -321,12 +321,35 @@ async function deleteAllReposts() {
   sendMsg(totalDeleted > 0 ? { type: 'done', count: totalDeleted } : { type: 'none' });
 }
 
+// ---------- Count reposts ----------
+
+async function countReposts() {
+  if (!isLoggedIn()) {
+    await sleep(1500);
+    if (!isLoggedIn()) { sendMsg({ type: 'notLoggedIn' }); return; }
+  }
+
+  // Navigate to the repost tab if not already there
+  if (!isRepostTabActive()) {
+    const navigated = await navigateToReposts();
+    if (!navigated) { sendMsg({ type: 'count', count: 0 }); return; }
+  }
+
+  // Wait for the grid to populate, then count
+  const cards = await waitForVideoCards(6000);
+  sendMsg({ type: 'count', count: cards.length });
+}
+
 // ---------- Message listener ----------
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === 'deleteReposts') {
     deleteAllReposts().catch((err) => {
       sendMsg({ type: 'error', message: 'Unexpected error: ' + err.message });
+    });
+  } else if (msg.action === 'countReposts') {
+    countReposts().catch((err) => {
+      sendMsg({ type: 'error', message: 'Count error: ' + err.message });
     });
   }
 });

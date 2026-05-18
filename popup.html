@@ -9,13 +9,18 @@
 <body>
   <div class="logo">Tik<span>Tok</span> Repost Deleter</div>
 
-  <button id="deleteBtn">Delete All Reposts</button>
+  <div class="count-badge" id="countBadge">
+    <span class="count-number" id="countNumber">—</span>
+    <span class="count-label" id="countLabel">checking reposts...</span>
+  </div>
+
+  <button id="deleteBtn" disabled>Delete All Reposts</button>
 
   <div class="progress-bar-wrap" id="progressWrap">
     <div class="progress-bar" id="progressBar"></div>
   </div>
 
-  <div id="status">Click the button to remove all your reposts.</div>
+  <div id="status"></div>
 
   <script src="popup.js"></script>
 </body>
