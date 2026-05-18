@@ -1,0 +1,21 @@
+﻿{
+  "manifest_version": 3,
+  "name": "TikTok Repost Deleter",
+  "version": "1.0.0",
+  "description": "Automatically delete all reposts from your TikTok account with one click.",
+  "icons": {"128": "icon.png"},
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png",
+    "default_title": "TikTok Repost Deleter"
+  },
+  "permissions": ["activeTab", "scripting", "tabs"],
+  "host_permissions": ["https://*.tiktok.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://*.tiktok.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
