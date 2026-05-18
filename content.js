@@ -1,19 +1,20 @@
-﻿// content.js — TikTok Repost Deleter
-// TikTok hides card overlay buttons via CSS :hover. JS mouse events do NOT trigger CSS
-// pseudo-classes, so we force-reveal buttons via inline styles before interacting.
+﻿// content.js — TikTok Repost Deleter v3
+// Strategy: SPA-navigate to each video page and remove the repost there.
+// Video page action buttons are always visible (no CSS hover hiding), which makes
+// this far more reliable than trying to click the hidden grid overlay button.
 
-const DELAY_MS     = 1500;
-const NAV_WAIT_MS  = 3000;
-const MENU_WAIT_MS = 1200;
+const DELAY_MS     = 800;    // pause between deletions
+const NAV_WAIT_MS  = 3500;   // wait for SPA navigation to settle
+const MENU_WAIT_MS = 1200;   // wait for context menu to render
 const RETRY_LIMIT  = 3;
 const MAX_REPOSTS  = 500;
 
-// Stable data-e2e selectors — update these if TikTok changes their markup
+// Stable data-e2e selectors — these are the first thing to update when TikTok
+// changes their markup. Everything else falls back to text / structural heuristics.
 const SELECTORS = {
   userAvatar: [
     '[data-e2e="nav-avatar"]',
     '[data-e2e="header-user-avatar"]',
-    '[data-e2e="profile-icon"]',
     '[data-e2e="nav-upload"]',
     'header a[href^="/@"]',
   ],
@@ -27,9 +28,11 @@ const SELECTORS = {
     '[data-e2e="repost-item"]',
     '[data-e2e="user-repost-item"]',
   ],
-  moreBtn: [
-    '[data-e2e="video-card-more-btn"]',
-    '[data-e2e="user-post-item-more"]',
+  // "..." button on the VIDEO PAGE (always visible — not hover-gated)
+  videoPageMore: [
+    '[data-e2e="browse-video-more"]',
+    '[data-e2e="video-more-btn"]',
+    '[data-e2e="video-more"]',
     'button[aria-label*="more" i]',
     'button[aria-label*="option" i]',
   ],
@@ -87,16 +90,13 @@ function isRepostTabActive() {
   return false;
 }
 
-// ---------- Video card detection ----------
+// ---------- Video card / link detection ----------
 
 function findVideoCards() {
-  // Strategy 1: data-e2e
   for (const sel of SELECTORS.videoCard) {
     const items = [...document.querySelectorAll(sel)];
     if (items.length) return items;
   }
-
-  // Strategy 2: containers of video links
   const links = [...document.querySelectorAll('a[href*="/video/"]')];
   if (links.length) {
     const set = new Set();
@@ -109,27 +109,15 @@ function findVideoCards() {
       }
     }
     if (set.size) return [...set];
-    return links; // fallback: use the links themselves as handles
+    return links;
   }
-
-  // Strategy 3: CDN thumbnail images
-  const imgs = [...document.querySelectorAll(
-    'img[src*="tiktokcdn"], img[src*="p16-sign"], img[src*="p19-sign"]'
-  )];
-  if (imgs.length) {
-    const set = new Set();
-    for (const img of imgs) {
-      let el = img.parentElement;
-      while (el && el !== document.body) {
-        const p = el.parentElement;
-        if (p && p.childElementCount >= 2) { set.add(el); break; }
-        el = p;
-      }
-    }
-    if (set.size) return [...set];
-  }
-
   return [];
+}
+
+// Get a video page URL from a card element
+function getVideoLink(card) {
+  if (card.tagName === 'A' && card.href && card.href.includes('/video/')) return card;
+  return card.querySelector('a[href*="/video/"]');
 }
 
 async function waitForVideoCards(ms = 8000) {
@@ -142,94 +130,36 @@ async function waitForVideoCards(ms = 8000) {
   return [];
 }
 
-// ---------- Force card overlay visible ----------
-// TikTok hides the "..." button in a CSS-opacity overlay. JS mouseenter events do NOT
-// trigger CSS :hover, so the button stays invisible. We override inline styles to reveal it.
+// ---------- Video page detection ----------
 
-function revealCardOverlay(card) {
-  // Reveal overlay / mask wrapper elements
-  const overlaySelectors = [
-    '[class*="overlay" i]', '[class*="mask" i]', '[class*="Overlay"]',
-    '[class*="Mask"]', '[class*="Cover"]', '[class*="cover" i]',
-    '[class*="action" i]', '[class*="Action"]',
-  ];
-  for (const sel of overlaySelectors) {
-    for (const el of card.querySelectorAll(sel)) {
-      el.style.setProperty('opacity', '1', 'important');
-      el.style.setProperty('visibility', 'visible', 'important');
+// Returns true once we are on a video page and the page has settled
+async function waitForVideoPage(ms = 7000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (window.location.pathname.includes('/video/')) {
+      const ready = document.querySelector(
+        '[data-e2e="browse-video-more"], [data-e2e="browse-video-desc"], ' +
+        '[data-e2e="video-play"], video, [class*="DivVideoWrapper"]'
+      );
+      if (ready) return true;
     }
-  }
-  // Reveal every button inside the card
-  for (const btn of card.querySelectorAll('button, [role="button"], a')) {
-    btn.style.setProperty('opacity', '1', 'important');
-    btn.style.setProperty('visibility', 'visible', 'important');
-    btn.style.setProperty('pointer-events', 'auto', 'important');
-    btn.style.setProperty('display', btn.style.display === 'none' ? 'block' : btn.style.display, 'important');
-  }
-}
-
-// ---------- More button ----------
-
-async function findMoreButton(card) {
-  const rect = card.getBoundingClientRect();
-  const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
-
-  for (let attempt = 0; attempt < 4; attempt++) {
-    // Fire realistic pointer events on each attempt
-    const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy };
-    card.dispatchEvent(new PointerEvent('pointerover', opts));
-    card.dispatchEvent(new MouseEvent('mouseenter', opts));
-    card.dispatchEvent(new MouseEvent('mousemove', opts));
-    card.dispatchEvent(new MouseEvent('mouseover', opts));
     await sleep(300);
-
-    // Force all overlay elements and buttons to be visible
-    revealCardOverlay(card);
-    await sleep(200);
-
-    // 1. data-e2e attributes
-    let btn = firstMatch(SELECTORS.moreBtn, card);
-    if (btn) return btn;
-
-    // 2. aria-label anywhere in card
-    btn = card.querySelector('button[aria-label*="more" i], button[aria-label*="option" i]');
-    if (btn) return btn;
-
-    // 3. Icon-only buttons (SVG, no visible text) — TikTok ellipsis buttons are usually these
-    for (const b of card.querySelectorAll('button, [role="button"]')) {
-      if (b.querySelector('svg') && b.textContent.trim() === '') return b;
-    }
-
-    // 4. Look for buttons near the top-right corner of the card (where "..." typically lives)
-    const allBtns = [...card.querySelectorAll('button, [role="button"]')];
-    for (const b of allBtns) {
-      const br = b.getBoundingClientRect();
-      if (br.right > rect.right - rect.width * 0.3 &&
-          br.top < rect.top + rect.height * 0.4) {
-        return b;
-      }
-    }
-
-    // 5. Document-level fallback
-    btn = firstMatch(SELECTORS.moreBtn, document);
-    if (btn) return btn;
   }
-  return null;
+  return false;
 }
 
-// ---------- Remove-repost menu item ----------
+// ---------- Remove repost from video page ----------
 
+// Scan for the "Remove repost" text in any currently open menu / sheet
 function findRemoveRepostItem() {
   const byAttr = firstMatch(SELECTORS.removeRepost, document);
   if (byAttr) return byAttr;
-
   const candidates = document.querySelectorAll(
     '[role="menuitem"], [role="option"], li, ' +
     '[class*="menu" i] button, [class*="Menu"] button, ' +
-    '[class*="ActionSheet" i] button, [class*="BottomSheet" i] button, ' +
-    '[class*="Sheet"] button, [class*="Drawer"] button, ' +
-    '[class*="list" i] li, [class*="List"] li'
+    '[class*="sheet" i] button, [class*="Sheet"] button, ' +
+    '[class*="drawer" i] button, [class*="Drawer"] button, ' +
+    '[class*="action" i] li, [class*="list" i] li'
   );
   const keywords = ['remove repost', 'unrepost', 'remove from reposts', 'undo repost'];
   for (const el of candidates) {
@@ -239,81 +169,36 @@ function findRemoveRepostItem() {
   return null;
 }
 
-// ---------- Navigation ----------
-
-async function navigateToReposts() {
-  if (!isLoggedIn()) {
-    await sleep(2000);
-    if (!isLoggedIn()) { sendMsg({ type: 'notLoggedIn' }); return false; }
-  }
-
-  if (isRepostTabActive()) return true;
-
-  if (!window.location.pathname.startsWith('/@')) {
-    const profileLink = document.querySelector(
-      'a[href^="/@"][data-e2e="nav-profile"], header a[href^="/@"]'
-    );
-    if (profileLink) { profileLink.click(); await sleep(NAV_WAIT_MS); }
-  }
-
-  let tab = findRepostTab();
+async function findVideoPageMoreButton() {
   const deadline = Date.now() + 6000;
-  while (!tab && Date.now() < deadline) { await sleep(500); tab = findRepostTab(); }
+  while (Date.now() < deadline) {
+    // 1. Named data-e2e selectors
+    const byAttr = firstMatch(SELECTORS.videoPageMore);
+    if (byAttr) return byAttr;
 
-  if (!tab) { sendMsg({ type: 'none' }); return false; }
-
-  tab.click();
-  await sleep(NAV_WAIT_MS);
-  return true;
-}
-
-// ---------- Core loop ----------
-
-async function deleteAllReposts() {
-  const navigated = await navigateToReposts();
-  if (!navigated) return;
-
-  const initial = await waitForVideoCards(8000);
-  if (!initial.length) { sendMsg({ type: 'none' }); return; }
-
-  let totalDeleted = 0;
-
-  for (let i = 0; i < MAX_REPOSTS; i++) {
-    const cards = findVideoCards();
-    if (!cards.length) break;
-
-    const card = cards[0];
-    sendMsg({ type: 'progress', current: totalDeleted + 1, total: cards.length + totalDeleted });
-
-    let success = false;
-    for (let attempt = 0; attempt < RETRY_LIMIT; attempt++) {
-      success = await deleteOneRepost(card);
-      if (success) break;
-      await sleep(DELAY_MS);
+    // 2. Icon-only buttons in the right-side action panel
+    const actionPanel = document.querySelector(
+      '[data-e2e="browse-video-action-bar"], [class*="DivActionBar"], ' +
+      '[class*="action-bar" i], [class*="ActionBar"]'
+    );
+    const searchRoot = actionPanel || document;
+    for (const btn of searchRoot.querySelectorAll('button, [role="button"]')) {
+      if (btn.querySelector('svg') && !btn.textContent.trim()) return btn;
     }
 
-    if (success) {
-      totalDeleted++;
-      await sleep(DELAY_MS);
-    } else {
-      // All retries failed — report what we know and stop
-      sendMsg({ type: 'error', message: `Stopped after ${totalDeleted} deletion(s). TikTok may have changed their menu UI — open DevTools on the repost grid and check what the "..." button looks like, then update SELECTORS in content.js.` });
-      return;
+    // 3. Look for a button whose accessible name or title hints at "more"
+    for (const btn of document.querySelectorAll('button, [role="button"]')) {
+      const label = (btn.getAttribute('aria-label') || btn.title || '').toLowerCase();
+      if (label.includes('more') || label.includes('option')) return btn;
     }
+
+    await sleep(400);
   }
-
-  sendMsg(totalDeleted > 0 ? { type: 'done', count: totalDeleted } : { type: 'none' });
+  return null;
 }
 
-async function deleteOneRepost(card) {
-  card.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  await sleep(400);
-
-  // Reveal hidden overlay buttons before searching
-  revealCardOverlay(card);
-  await sleep(200);
-
-  const moreBtn = await findMoreButton(card);
+async function removeRepostFromVideoPage() {
+  const moreBtn = await findVideoPageMoreButton();
   if (!moreBtn) return false;
 
   moreBtn.click();
@@ -333,6 +218,107 @@ async function deleteOneRepost(card) {
   if (confirmBtn) { confirmBtn.click(); await sleep(MENU_WAIT_MS); }
 
   return true;
+}
+
+// ---------- Navigation ----------
+
+async function navigateToReposts() {
+  if (!isLoggedIn()) {
+    await sleep(2000);
+    if (!isLoggedIn()) { sendMsg({ type: 'notLoggedIn' }); return false; }
+  }
+  if (isRepostTabActive()) return true;
+
+  if (!window.location.pathname.startsWith('/@')) {
+    const profileLink = document.querySelector(
+      'a[href^="/@"][data-e2e="nav-profile"], header a[href^="/@"]'
+    );
+    if (profileLink) { profileLink.click(); await sleep(NAV_WAIT_MS); }
+  }
+
+  let tab = findRepostTab();
+  const deadline = Date.now() + 6000;
+  while (!tab && Date.now() < deadline) { await sleep(500); tab = findRepostTab(); }
+  if (!tab) { sendMsg({ type: 'none' }); return false; }
+
+  tab.click();
+  await sleep(NAV_WAIT_MS);
+  return true;
+}
+
+// ---------- Core deletion loop ----------
+
+async function deleteAllReposts() {
+  const navigated = await navigateToReposts();
+  if (!navigated) return;
+
+  const initial = await waitForVideoCards(8000);
+  if (!initial.length) { sendMsg({ type: 'none' }); return; }
+
+  let totalDeleted = 0;
+
+  for (let i = 0; i < MAX_REPOSTS; i++) {
+    // Always re-query after returning from the video page
+    const cards = findVideoCards();
+    if (!cards.length) break;
+
+    const card = cards[0];
+    const estimatedTotal = cards.length + totalDeleted;
+    sendMsg({ type: 'progress', current: totalDeleted + 1, total: estimatedTotal });
+
+    // Get the clickable <a> link from the card
+    const videoLink = getVideoLink(card);
+    if (!videoLink) {
+      sendMsg({ type: 'error', message: 'Could not find a video link on the repost card. TikTok may have changed their layout.' });
+      return;
+    }
+
+    // --- SPA navigate to the video page ---
+    videoLink.click();
+    const loaded = await waitForVideoPage(7000);
+    if (!loaded) {
+      // Bail back to the repost list and skip this one
+      history.back();
+      await sleep(NAV_WAIT_MS);
+      continue;
+    }
+    await sleep(600); // let the page fully settle
+
+    // --- Remove the repost from the video page ---
+    let success = false;
+    for (let attempt = 0; attempt < RETRY_LIMIT; attempt++) {
+      success = await removeRepostFromVideoPage();
+      if (success) break;
+      await sleep(1200);
+    }
+
+    // --- Navigate back to the repost grid ---
+    history.back();
+    await sleep(NAV_WAIT_MS);
+
+    // Re-click the Reposts tab so TikTok fetches the updated list
+    // (without this, bfcache may restore the old grid with the deleted item still showing)
+    const tab = findRepostTab();
+    if (tab) { tab.click(); await sleep(NAV_WAIT_MS); }
+
+    await waitForVideoCards(5000);
+
+    if (success) {
+      totalDeleted++;
+      await sleep(DELAY_MS);
+    } else {
+      sendMsg({
+        type: 'error',
+        message: `Stopped after ${totalDeleted} deletion(s). ` +
+          `The "Remove repost" option was not found on the video page — ` +
+          `TikTok may have renamed it. Open DevTools on a TikTok video page, ` +
+          `click the "..." button, and check what the menu item is called.`
+      });
+      return;
+    }
+  }
+
+  sendMsg(totalDeleted > 0 ? { type: 'done', count: totalDeleted } : { type: 'none' });
 }
 
 // ---------- Message listener ----------
